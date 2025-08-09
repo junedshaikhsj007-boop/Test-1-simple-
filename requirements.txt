@@ -1,3 +1,5 @@
-python-telegram-bot==20.3
-telethon==1.29.3
+telethon
+python-telegram-bot>=20.0
+Flask
 requests
+python-dotenv

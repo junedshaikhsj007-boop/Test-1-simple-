@@ -2,7 +2,8 @@ import asyncio
 import requests
 import time
 import threading
-from telethon import TelegramClient
+from flask import Flask
+from telethon import TelegramClient, events
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
@@ -10,9 +11,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 # --- Telegram API ---
 api_id = 22467314
 api_hash = "08181401f6807cdc954f6c7d8231dfcf"
-client = TelegramClient("session", api_id, api_hash)
 
-# --- Bot ---
+# Bot Token (used for BOTH Telethon and python-telegram-bot)
 BOT_TOKEN = "7962211786:AAHBZIxnb6oJr2W3KXQs74x31kn2KDpIJGE"
 CHANNEL_ID = -1002324737561
 BOT_USERNAME = "Jak_boi_bot"
@@ -29,6 +29,10 @@ UPTIME_ROBOT_INTERVAL = 300  # 5 minutes
 # --- Constants ---
 RESULTS_PER_PAGE = 8
 
+# --- Telethon client (ALWAYS start with bot token to avoid asking for phone) ---
+client = TelegramClient("session", api_id, api_hash).start(bot_token=BOT_TOKEN)
+
+# --- Short link maker ---
 def make_short_link(msg_id: int) -> str:
     real_url = f"https://t.me/{BOT_USERNAME}?start=unlock_{msg_id}"
     try:
@@ -41,6 +45,7 @@ def make_short_link(msg_id: int) -> str:
         print(f"NanoLinks error: {e}")
         return real_url
 
+# --- Keep-alive and pinging ---
 def start_uptime_robot_monitor():
     monitor_exists = False
     monitors = requests.post(
@@ -80,6 +85,7 @@ def start_uptime_robot_monitor():
 
     threading.Thread(target=ping_server, daemon=True).start()
 
+# --- Bot commands ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if args and args[0].startswith("unlock_"):
@@ -103,13 +109,12 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     results = []
     try:
-        async with client:
-            async for msg in client.iter_messages(CHANNEL_ID, search=query_text, limit=100):
-                if msg.text:
-                    preview = msg.text.split('\n')[0][:35] + "..." if len(msg.text) > 35 else msg.text
-                else:
-                    preview = f"{msg.file.name[:30]}..." if msg.file and msg.file.name else "Media File"
-                results.append((msg.id, preview))
+        async for msg in client.iter_messages(CHANNEL_ID, search=query_text, limit=100):
+            if msg.text:
+                preview = msg.text.split('\n')[0][:35] + "..." if len(msg.text) > 35 else msg.text
+            else:
+                preview = f"{msg.file.name[:30]}..." if msg.file and msg.file.name else "Media File"
+            results.append((msg.id, preview))
     except Exception as e:
         print(f"Search error: {e}")
         await update.message.reply_text("🔍 Search failed. Try again later.")
@@ -177,12 +182,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             disable_web_page_preview=True
         )
 
-async def telethon_init():
-    await client.start()
-    print("Telethon client started")
-
+# --- Web server for Render ---
 def run_web_server():
-    from flask import Flask
     app = Flask(__name__)
 
     @app.route('/')
@@ -199,18 +200,17 @@ def run_web_server():
     ).start()
     print("Web server started")
 
+# --- Main ---
 def main():
     run_web_server()
     start_uptime_robot_monitor()
-    loop = asyncio.get_event_loop()
-    loop.create_task(telethon_init())
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search))
 
-    print("✅ Bot is running...")
+    print("✅ Bot is running without phone number prompt...")
     app.run_polling()
 
 if __name__ == "__main__":

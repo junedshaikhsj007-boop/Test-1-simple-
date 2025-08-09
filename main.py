@@ -1,107 +1,117 @@
-# main.py
-import os
 import asyncio
-import logging
-import threading
-import time
 import requests
-
+import time
+import threading
 from telethon import TelegramClient
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 
-# -------------------------
-# Logging
-# -------------------------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("jak_bot")
+# --- Telegram API ---
+api_id = 22467314
+api_hash = "08181401f6807cdc954f6c7d8231dfcf"
+client = TelegramClient("session", api_id, api_hash)
 
-# -------------------------
-# Read config from environment (set these in Render)
-# -------------------------
-API_ID = os.environ.get("API_ID")            # must be int-like
-API_HASH = os.environ.get("API_HASH")
-BOT_TOKEN = os.environ.get("BOT_TOKEN")      # your bot token (keep secret)
-CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "-1002324737561"))
-BOT_USERNAME = os.environ.get("BOT_USERNAME", "Jak_boi_bot")
-NANOLINKS_API_KEY = os.environ.get("NANOLINKS_API_KEY", "")
-NANOLINKS_API_URL = os.environ.get("NANOLINKS_API_URL", "https://nanolinks.in/api")
-RESULTS_PER_PAGE = int(os.environ.get("RESULTS_PER_PAGE", "8"))
+# --- Bot ---
+BOT_TOKEN = "7962211786:AAHBZIxnb6oJr2W3KXQs74x31kn2KDpIJGE"
+CHANNEL_ID = -1002324737561
+BOT_USERNAME = "Jak_boi_bot"
 
-# basic validation
-if not API_ID or not API_HASH or not BOT_TOKEN:
-    logger.error("Missing API_ID, API_HASH or BOT_TOKEN in environment. Exiting.")
-    raise SystemExit("Set API_ID, API_HASH, BOT_TOKEN in environment variables before running.")
+# --- NanoLinks API ---
+NANOLINKS_API_KEY = "3d2e0094ca3b5a3876561c5773ce59a35c2e3493"
+NANOLINKS_API_URL = "https://nanolinks.in/api"
 
-API_ID = int(API_ID)
+# --- UptimeRobot Config ---
+UPTIME_ROBOT_API_KEY = "u3062007-45b2fb20c53821a6b2ed4eaf"
+UPTIME_ROBOT_MONITOR_URL = "https://replit.com/@junedshaikhsj00/Jak-boi-bot"
+UPTIME_ROBOT_INTERVAL = 300  # 5 minutes
 
-# -------------------------
-# Telethon client (used to read/search channel)
-# -------------------------
-telethon_session = os.environ.get("TELETHON_SESSION", "bot_session")
-client = TelegramClient(telethon_session, API_ID, API_HASH)
+# --- Constants ---
+RESULTS_PER_PAGE = 8
 
 def make_short_link(msg_id: int) -> str:
-    """Use NanoLinks if configured, otherwise fallback to direct t.me link."""
     real_url = f"https://t.me/{BOT_USERNAME}?start=unlock_{msg_id}"
-    if not NANOLINKS_API_KEY:
-        return real_url
     try:
         params = {"api": NANOLINKS_API_KEY, "url": real_url}
         r = requests.get(NANOLINKS_API_URL, params=params, timeout=10)
         data = r.json()
-        # NanoLinks may use different fields; try common ones
-        short = data.get("shortenedUrl") or data.get("short_url") or data.get("url")
-        return short or real_url
+        short = data.get("shortenedUrl")
+        return short if short else real_url
     except Exception as e:
-        logger.warning("NanoLinks request failed: %s", e)
+        print(f"NanoLinks error: {e}")
         return real_url
 
-# -------------------------
-# Bot handlers
-# -------------------------
+def start_uptime_robot_monitor():
+    monitor_exists = False
+    monitors = requests.post(
+        "https://api.uptimerobot.com/v2/getMonitors",
+        data={"api_key": UPTIME_ROBOT_API_KEY, "format": "json", "logs": "0"}
+    ).json()
+
+    if monitors.get("stat") == "ok":
+        for monitor in monitors.get("monitors", []):
+            if monitor.get("url") == UPTIME_ROBOT_MONITOR_URL:
+                monitor_exists = True
+                print(f"Monitor already exists: {monitor.get('id')}")
+                break
+
+    if not monitor_exists:
+        response = requests.post(
+            "https://api.uptimerobot.com/v2/newMonitor",
+            data={
+                "api_key": UPTIME_ROBOT_API_KEY,
+                "format": "json",
+                "type": "1",
+                "url": UPTIME_ROBOT_MONITOR_URL,
+                "friendly_name": f"{BOT_USERNAME} Telegram Bot",
+                "interval": str(UPTIME_ROBOT_INTERVAL)
+            }
+        )
+        print("Monitor created:", response.json())
+
+    def ping_server():
+        while True:
+            try:
+                requests.get(UPTIME_ROBOT_MONITOR_URL, timeout=10)
+                print(f"Pinged at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+            except Exception as e:
+                print(f"Ping error: {e}")
+            time.sleep(UPTIME_ROBOT_INTERVAL - 30)
+
+    threading.Thread(target=ping_server, daemon=True).start()
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start and unlock links like ?start=unlock_<msg_id>"""
     args = context.args
-    # handle unlock link
     if args and args[0].startswith("unlock_"):
         try:
             msg_id = int(args[0].replace("unlock_", ""))
             await context.bot.forward_message(
-                chat_id=update.effective_chat.id,
+                chat_id=update.message.chat_id,
                 from_chat_id=CHANNEL_ID,
                 message_id=msg_id
             )
         except Exception as e:
-            logger.exception("Forward error: %s", e)
+            print(f"Forward error: {e}")
             await update.message.reply_text("⚠️ File not found or deleted.")
         return
-
     await update.message.reply_text("🔍 Send me a keyword to search my media library:")
 
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Search the configured channel for messages that include the query text."""
-    if not update.message or not update.message.text:
-        return
-    query_text = update.message.text.strip()
+    query_text = update.message.text.strip().lower()
     if not query_text:
         return
 
     results = []
     try:
-        # Telethon client must be started already
-        async for msg in client.iter_messages(CHANNEL_ID, search=query_text, limit=200):
-            # safe text extraction
-            msg_text = getattr(msg, "text", None) or getattr(msg, "message", None) or getattr(msg, "raw_text", "")
-            if msg_text:
-                preview = msg_text.split("\n")[0][:35] + ("..." if len(msg_text) > 35 else "")
-            else:
-                fname = getattr(getattr(msg, "file", None), "name", None)
-                preview = (fname[:30] + "...") if fname else "Media File"
-            results.append((msg.id, preview))
+        async with client:
+            async for msg in client.iter_messages(CHANNEL_ID, search=query_text, limit=100):
+                if msg.text:
+                    preview = msg.text.split('\n')[0][:35] + "..." if len(msg.text) > 35 else msg.text
+                else:
+                    preview = f"{msg.file.name[:30]}..." if msg.file and msg.file.name else "Media File"
+                results.append((msg.id, preview))
     except Exception as e:
-        logger.exception("Search error: %s", e)
+        print(f"Search error: {e}")
         await update.message.reply_text("🔍 Search failed. Try again later.")
         return
 
@@ -138,7 +148,6 @@ async def send_results_page(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     query = context.user_data.get("query", "")
-
     if update.message:
         await update.message.reply_text(
             f"🔍 Found {len(results)} results for '{query}' (Page {page + 1}/{total_pages}):",
@@ -162,71 +171,47 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("result_"):
         msg_id = int(data.replace("result_", ""))
         short_link = make_short_link(msg_id)
-        # edit to show link (user will click and get unlock flow)
         await query.edit_message_text(
             text=f"👉 [Click here to get your result]({short_link})\n\n(Wait for ads, you'll come back here automatically)",
             parse_mode=ParseMode.MARKDOWN,
             disable_web_page_preview=True
         )
 
-# -------------------------
-# Telethon startup (as a bot)
-# -------------------------
 async def telethon_init():
-    try:
-        # Start Telethon using bot token (no interactive login)
-        await client.start(bot_token=BOT_TOKEN)
-        logger.info("Telethon client started (bot account).")
-    except Exception as e:
-        logger.exception("Failed to start Telethon client: %s", e)
+    await client.start()
+    print("Telethon client started")
 
-# -------------------------
-# Small web server (health & root) - useful if you use "Web Service"
-# -------------------------
 def run_web_server():
-    # keep Flask optional and simple
-    try:
-        from flask import Flask
-    except Exception:
-        logger.warning("Flask not installed, skipping web server (fine for Background Worker).")
-        return
-
+    from flask import Flask
     app = Flask(__name__)
 
-    @app.route("/")
+    @app.route('/')
     def home():
         return f"{BOT_USERNAME} Bot is running!"
 
-    @app.route("/health")
+    @app.route('/health')
     def health():
         return "OK", 200
 
-    port = int(os.environ.get("PORT", "8080"))
     threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False),
+        target=lambda: app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False),
         daemon=True
     ).start()
-    logger.info("Web server started on port %s", port)
+    print("Web server started")
 
-# -------------------------
-# Main
-# -------------------------
 def main():
-    run_web_server()  # optional health endpoints (works on Render web services)
+    run_web_server()
+    start_uptime_robot_monitor()
     loop = asyncio.get_event_loop()
     loop.create_task(telethon_init())
 
-    # Telegram bot app (python-telegram-bot)
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search))
 
-    logger.info("✅ Bot is running (polling). Press Ctrl+C to stop.")
-    try:
-        app.run_polling()
-    except Exception as e:
-        logger.exception("Bot exited with error: %s", e)
+    print("✅ Bot is running...")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
